@@ -6,6 +6,9 @@
       "features": [
         "flight"
       ]
+    },
+    {
+      "name": "protobuf"
     }
   ],
   "vcpkg-configuration": {

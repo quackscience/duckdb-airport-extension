@@ -6,3 +6,6 @@
 	path = extension-ci-tools
 	url = git@github.com:rustyconover/extension-ci-tools.git
 	branch = main
+[submodule "substrait"]
+	path = substrait
+	url = https://github.com/substrait-io/substrait

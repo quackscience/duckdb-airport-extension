@@ -2,6 +2,10 @@
 
 #include "airport_extension.hpp"
 #include "duckdb.hpp"
+
+#include "duckdb/planner/logical_operator.hpp"
+#include "duckdb/planner/operator/logical_filter.hpp"
+
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/function/scalar_function.hpp"
@@ -15,6 +19,8 @@
 #include <arrow/c/bridge.h>
 
 #include "airport_flight_stream.hpp"
+
+#include "to_substrait.hpp"
 
 namespace flight = arrow::flight;
 
@@ -454,9 +460,14 @@ unique_ptr<NodeStatistics> take_flight_cardinality(ClientContext &context, const
 }
 
 
-void list_flights_complex_filter_pushdown(ClientContext &context, LogicalGet &get, FunctionData *bind_data_p,
+void list_flights_complex_filter_pushdown(ClientContext &context,
+                                          LogicalGet &get,
+                                          FunctionData *bind_data_p,
                                           vector<unique_ptr<Expression>> &filters) {
 //	auto &data = bind_data_p->Cast<JSONScanData>();
+
+    auto f = DuckDBToSubstrait(context, reinterpret_cast<LogicalOperator &>(get), true);
+    printf("Plan is %s\n", f.SerializeToJson().c_str());
 
     for(auto &f : filters) {
         printf("Filter is %s\n", f->ToString().c_str());
@@ -487,7 +498,7 @@ static void LoadInternal(DatabaseInstance &instance) {
         ListFlightsGlobalState::Init);
 
     list_flights_function.pushdown_complex_filter = list_flights_complex_filter_pushdown;
-    list_flights_function.filter_pushdown = false;
+    list_flights_function.filter_pushdown = true;
 
     // Need a named parameter for the criteria.
 
