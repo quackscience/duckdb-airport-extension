@@ -123,6 +123,7 @@ namespace duckdb
         AddListFlightsFunction(instance);
 
         AddTakeFlightFunction(instance);
+        AddTakeFlightCustomFunction(instance);
 
         SecretType secret_type;
         secret_type.name = "airport";
