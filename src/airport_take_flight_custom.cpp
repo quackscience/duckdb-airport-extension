@@ -96,6 +96,7 @@ struct TakeFlightParameters {
     string server_location;
     string auth_token;
     string secret_name;
+    string database;
 };
 
 static TakeFlightParameters ParseTakeFlightParameters(
@@ -111,6 +112,8 @@ static TakeFlightParameters ParseTakeFlightParameters(
             params.auth_token = StringValue::Get(kv.second);
         } else if (loption == "secret") {
             params.secret_name = StringValue::Get(kv.second);
+        } else if (loption == "database") {
+            params.database = StringValue::Get(kv.second);
         }
     }
 
@@ -185,6 +188,7 @@ static unique_ptr<FunctionData> take_flight_bind_with_descriptor(
     ret->flight_client = std::move(flight_client);
     ret->auth_token = take_flight_params.auth_token;
     ret->server_location = take_flight_params.server_location;
+    ret->database = take_flight_params.database;
     ret->trace_id = trace_uuid;
 
     auto &data = *ret;
@@ -253,9 +257,22 @@ static unique_ptr<FunctionData> take_flight_custom_ticket_bind(
     auto custom_ticket = input.inputs[1].ToString();
     auto params = ParseTakeFlightParameters(server_location, context, input);
 
+    // Extract database value from the custom ticket JSON
+    yyjson_doc *doc = yyjson_read(custom_ticket.c_str(), custom_ticket.size(), 0);
+    yyjson_val *root = yyjson_doc_get_root(doc);
+    yyjson_val *database_val = yyjson_obj_get(root, "database");
+    string database = yyjson_get_str(database_val);
+    yyjson_doc_free(doc);
+
     flight::FlightDescriptor descriptor = flight_custom_ticket_descriptor(custom_ticket);
 
-    return take_flight_bind_with_descriptor(params, descriptor, context, input, return_types, names, nullptr);
+    auto bind_data = take_flight_bind_with_descriptor(params, descriptor, context, input, return_types, names, nullptr);
+
+    // Add the database to the bind data
+    auto &airport_bind_data = bind_data->CastNoConst<AirportTakeFlightBindData>();
+    airport_bind_data.database = database;
+
+    return bind_data;
 }
 
 static void take_flight(ClientContext &context, TableFunctionInput &data_p, DataChunk &output) {
@@ -319,6 +336,10 @@ static unique_ptr<GlobalTableFunctionState> AirportArrowScanInitGlobal(ClientCon
         call_options.headers.emplace_back("authorization", ss.str());
     }
 
+    if (!bind_data.database.empty()) {
+        call_options.headers.emplace_back("database", bind_data.database);
+    }
+
     call_options.headers.emplace_back("airport-trace-id", bind_data.trace_id);
 
     if (bind_data.skip_producing_result_for_update_or_delete) {
@@ -363,11 +384,12 @@ static unique_ptr<GlobalTableFunctionState> AirportArrowScanInitGlobal(ClientCon
 }
 
 void AddTakeFlightCustomFunction(DatabaseInstance &instance) {
+
     auto take_flight_custom_function_set = TableFunctionSet("airport_take_flight_custom");
 
     auto take_flight_custom_function = TableFunction(
         "airport_take_flight_custom",
-        {LogicalType::VARCHAR, LogicalType::BLOB},
+        {LogicalType::VARCHAR, LogicalType::VARCHAR},  // Update the second parameter to VARCHAR
         take_flight,
         take_flight_custom_ticket_bind,
         AirportArrowScanInitGlobal,
@@ -375,6 +397,7 @@ void AddTakeFlightCustomFunction(DatabaseInstance &instance) {
 
     take_flight_custom_function.named_parameters["auth_token"] = LogicalType::VARCHAR;
     take_flight_custom_function.named_parameters["secret"] = LogicalType::VARCHAR;
+    take_flight_custom_function.named_parameters["database"] = LogicalType::VARCHAR;
 
     take_flight_custom_function_set.AddFunction(take_flight_custom_function);
 

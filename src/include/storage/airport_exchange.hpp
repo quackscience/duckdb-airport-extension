@@ -30,6 +30,8 @@ namespace duckdb
 
     vector<string> names;
     vector<LogicalType> return_types;
+
+    string database;
   };
 
   // This is all of the state is needed to perform a ArrowScan on a resulting
