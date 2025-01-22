@@ -18,6 +18,6 @@ namespace duckdb
 
 	void AddTakeFlightFunction(DatabaseInstance &instance);
 
-        void AddTakeCustomFlightFunction(DatabaseInstance &instance);
+        void AddTakeFlightCustomFunction(DatabaseInstance &instance);
 
 } // namespace duckdb
