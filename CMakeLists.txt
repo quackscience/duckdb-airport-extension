@@ -23,6 +23,7 @@ set(EXTENSION_SOURCES
   src/airport_list_flights.cpp
   src/airport_secrets.cpp
   src/airport_take_flight.cpp
+  src/airport_take_flight_custom.cpp
   src/storage/airport_catalog_api.cpp
   src/storage/airport_catalog_set.cpp
   src/storage/airport_catalog.cpp
