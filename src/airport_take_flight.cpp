@@ -10,7 +10,7 @@
 #include "duckdb/main/secret/secret_manager.hpp"
 #include "duckdb/planner/operator/logical_get.hpp"
 #include "duckdb/common/types/uuid.hpp"
-
+#include "airport_take_flight.hpp"
 #include "airport_json_common.hpp"
 #include "airport_json_serializer.hpp"
 #include "airport_flight_stream.hpp"
@@ -20,6 +20,7 @@
 #include "airport_exception.hpp"
 #include "duckdb/common/arrow/schema_metadata.hpp"
 #include "duckdb/function/table/arrow/arrow_duck_schema.hpp"
+#include "msgpack.hpp"
 
 namespace duckdb
 {
@@ -91,19 +92,12 @@ namespace duckdb
     }
   }
 
-  struct TakeFlightParameters
-  {
-    string server_location;
-    string auth_token;
-    string secret_name;
-  };
-
-  static TakeFlightParameters ParseTakeFlightParameters(
+  AirportTakeFlightParameters AirportParseTakeFlightParameters(
       string &server_location,
       ClientContext &context,
       TableFunctionBindInput &input)
   {
-    TakeFlightParameters params;
+    AirportTakeFlightParameters params;
 
     params.server_location = server_location;
 
@@ -118,20 +112,26 @@ namespace duckdb
       {
         params.secret_name = StringValue::Get(kv.second);
       }
+      else if (loption == "ticket")
+      {
+        params.ticket = StringValue::Get(kv.second);
+      }
     }
 
     params.auth_token = AirportAuthTokenForLocation(context, params.server_location, params.secret_name, params.auth_token);
     return params;
   }
 
-  static unique_ptr<FunctionData> take_flight_bind_with_descriptor(
-      TakeFlightParameters &take_flight_params,
+  unique_ptr<FunctionData>
+  AirportTakeFlightBindWithFlightDescriptor(
+      const AirportTakeFlightParameters &take_flight_params,
       const flight::FlightDescriptor &descriptor,
       ClientContext &context,
       TableFunctionBindInput &input,
       vector<LogicalType> &return_types,
       vector<string> &names,
-      std::shared_ptr<flight::FlightInfo> *cached_info_ptr)
+      std::shared_ptr<flight::FlightInfo> *cached_info_ptr,
+      std::shared_ptr<GetFlightInfoTableFunctionParameters> table_function_parameters)
   {
 
     // Create a UID for tracing.
@@ -168,8 +168,6 @@ namespace duckdb
       call_options.headers.emplace_back("airport-flight-path", joined_path_parts);
     }
 
-    // FIXME: this may need to know if we need the row_id.
-
     // Get the information about the flight, this will allow the
     // endpoint information to be returned.
     unique_ptr<AirportTakeFlightScanData> scan_data;
@@ -182,11 +180,38 @@ namespace duckdb
     }
     else
     {
-      AIRPORT_FLIGHT_ASSIGN_OR_RAISE_LOCATION_DESCRIPTOR(auto retrieved_flight_info,
-                                                         flight_client->GetFlightInfo(call_options, descriptor),
-                                                         take_flight_params.server_location,
-                                                         descriptor,
-                                                         "");
+      std::unique_ptr<arrow::flight::FlightInfo> retrieved_flight_info;
+
+      if (table_function_parameters != nullptr)
+      {
+        // Rather than calling GetFlightInfo we will call DoAction and get
+        // get the flight info that way, since it allows us to serialize
+        // all of the data we need to send instead of just the flight name.
+        std::stringstream packed_buffer;
+        msgpack::pack(packed_buffer, table_function_parameters);
+        arrow::flight::Action action{"get_flight_info_table_function",
+                                     arrow::Buffer::FromString(packed_buffer.str())};
+
+        AIRPORT_FLIGHT_ASSIGN_OR_RAISE_LOCATION(auto action_results, flight_client->DoAction(call_options, action), take_flight_params.server_location, "airport_get_flight_info_table_function");
+
+        // The only item returned is a serialized flight info.
+        AIRPORT_FLIGHT_ASSIGN_OR_RAISE_LOCATION(auto serialized_flight_info_buffer, action_results->Next(), take_flight_params.server_location, "reading get_flight_info for table function");
+
+        std::string_view serialized_flight_info(reinterpret_cast<const char *>(serialized_flight_info_buffer->body->data()), serialized_flight_info_buffer->body->size());
+
+        // Now deserialize that flight info so we can use it.
+        AIRPORT_FLIGHT_ASSIGN_OR_RAISE_LOCATION(retrieved_flight_info, arrow::flight::FlightInfo::Deserialize(serialized_flight_info), take_flight_params.server_location, "deserialize flight info");
+
+        AIRPORT_ARROW_ASSERT_OK_LOCATION(action_results->Drain(), take_flight_params.server_location, "");
+      }
+      else
+      {
+        AIRPORT_FLIGHT_ASSIGN_OR_RAISE_LOCATION_DESCRIPTOR(retrieved_flight_info,
+                                                           flight_client->GetFlightInfo(call_options, descriptor),
+                                                           take_flight_params.server_location,
+                                                           descriptor,
+                                                           "");
+      }
 
       // Assert that the descriptor is the same as the one that was passed in.
       if (descriptor != retrieved_flight_info->descriptor())
@@ -218,6 +243,7 @@ namespace duckdb
 
     ret->scan_data = std::move(scan_data);
     ret->flight_client = std::move(flight_client);
+    ret->ticket = take_flight_params.ticket;
     ret->auth_token = take_flight_params.auth_token;
     ret->server_location = take_flight_params.server_location;
     ret->trace_id = trace_uuid;
@@ -264,18 +290,12 @@ namespace duckdb
       if (schema.dictionary)
       {
         auto dictionary_type = ArrowType::GetArrowLogicalType(DBConfig::GetConfig(context), *schema.dictionary);
-        if (!is_row_id_column)
-        {
-          return_types.emplace_back(dictionary_type->GetDuckType());
-        }
         arrow_type->SetDictionary(std::move(dictionary_type));
       }
-      else
+
+      if (!is_row_id_column)
       {
-        if (!is_row_id_column)
-        {
-          return_types.emplace_back(arrow_type->GetDuckType());
-        }
+        return_types.emplace_back(arrow_type->GetDuckType());
       }
 
       ret->arrow_table.AddColumn(is_row_id_column ? COLUMN_IDENTIFIER_ROW_ID : col_idx, std::move(arrow_type));
@@ -305,14 +325,14 @@ namespace duckdb
       vector<string> &names)
   {
     auto server_location = input.inputs[0].ToString();
-    auto params = ParseTakeFlightParameters(server_location, context, input);
+    auto params = AirportParseTakeFlightParameters(server_location, context, input);
     auto descriptor = flight_descriptor_from_value(input.inputs[1]);
 
-    return take_flight_bind_with_descriptor(
+    return AirportTakeFlightBindWithFlightDescriptor(
         params,
         descriptor,
         context,
-        input, return_types, names, nullptr);
+        input, return_types, names, nullptr, nullptr);
   }
 
   static unique_ptr<FunctionData> take_flight_bind_with_pointer(
@@ -322,7 +342,7 @@ namespace duckdb
       vector<string> &names)
   {
     auto server_location = input.inputs[0].ToString();
-    auto params = ParseTakeFlightParameters(server_location, context, input);
+    auto params = AirportParseTakeFlightParameters(server_location, context, input);
 
     if (input.inputs[1].IsNull())
     {
@@ -331,17 +351,18 @@ namespace duckdb
 
     const auto info = reinterpret_cast<std::shared_ptr<flight::FlightInfo> *>(input.inputs[1].GetPointer());
 
-    return take_flight_bind_with_descriptor(
+    return AirportTakeFlightBindWithFlightDescriptor(
         params,
         info->get()->descriptor(),
         context,
         input,
         return_types,
         names,
-        info);
+        info,
+        nullptr);
   }
 
-  static void take_flight(ClientContext &context, TableFunctionInput &data_p, DataChunk &output)
+  void AirportTakeFlight(ClientContext &context, TableFunctionInput &data_p, DataChunk &output)
   {
     if (!data_p.local_state)
     {
@@ -529,8 +550,8 @@ namespace duckdb
     return compressed_metadata;
   }
 
-  static unique_ptr<GlobalTableFunctionState> AirportArrowScanInitGlobal(ClientContext &context,
-                                                                         TableFunctionInitInput &input)
+  unique_ptr<GlobalTableFunctionState> AirportArrowScanInitGlobal(ClientContext &context,
+                                                                  TableFunctionInitInput &input)
   {
     auto &bind_data = input.bind_data->Cast<AirportTakeFlightBindData>();
 
@@ -570,7 +591,12 @@ namespace duckdb
 
     auto server_ticket = bind_data.scan_data->flight_info_->endpoints()[0].ticket;
     auto server_ticket_contents = server_ticket.ticket;
-    if (server_ticket_contents.find("<TICKET_ALLOWS_METADATA>") == 0)
+
+    if (!bind_data.ticket.empty())
+    {
+      server_ticket = flight::Ticket{bind_data.ticket};
+    }
+    else if (server_ticket_contents.find("<TICKET_ALLOWS_METADATA>") == 0)
     {
       // This ticket allows metadata to be supplied in the ticket.
 
@@ -646,13 +672,14 @@ namespace duckdb
     auto take_flight_function_with_descriptor = TableFunction(
         "airport_take_flight",
         {LogicalType::VARCHAR, LogicalType::ANY},
-        take_flight,
+        AirportTakeFlight,
         take_flight_bind,
         AirportArrowScanInitGlobal,
         ArrowTableFunction::ArrowScanInitLocal);
 
     take_flight_function_with_descriptor.named_parameters["auth_token"] = LogicalType::VARCHAR;
     take_flight_function_with_descriptor.named_parameters["secret"] = LogicalType::VARCHAR;
+    take_flight_function_with_descriptor.named_parameters["ticket"] = LogicalType::BLOB;
     take_flight_function_with_descriptor.pushdown_complex_filter = take_flight_complex_filter_pushdown;
 
     // Add support for optional named paraemters that would be appended to the descriptor
@@ -668,7 +695,7 @@ namespace duckdb
     auto take_flight_function_with_pointer = TableFunction(
         "airport_take_flight",
         {LogicalType::VARCHAR, LogicalType::POINTER},
-        take_flight,
+        AirportTakeFlight,
         take_flight_bind_with_pointer,
         AirportArrowScanInitGlobal,
         ArrowTableFunction::ArrowScanInitLocal);

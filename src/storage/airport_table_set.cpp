@@ -12,8 +12,10 @@
 #include "duckdb/parser/parsed_data/create_table_info.hpp"
 #include "duckdb/parser/parsed_data/create_function_info.hpp"
 #include "duckdb/parser/parsed_data/create_scalar_function_info.hpp"
+#include "duckdb/parser/parsed_data/create_table_function_info.hpp"
 #include "duckdb/planner/expression/bound_function_expression.hpp"
 #include "duckdb/catalog/catalog_entry/scalar_function_catalog_entry.hpp"
+#include "duckdb/catalog/catalog_entry/table_function_catalog_entry.hpp"
 #include "duckdb/parser/constraints/list.hpp"
 #include "storage/airport_schema_entry.hpp"
 #include "duckdb/parser/parser.hpp"
@@ -30,7 +32,10 @@
 #include "airport_scalar_function.hpp"
 #include "yyjson.hpp"
 #include "duckdb/common/arrow/arrow_converter.hpp"
+#include "airport_take_flight.hpp"
+#include "duckdb/common/arrow/arrow_appender.hpp"
 #include <arrow/buffer.h>
+#include <arrow/io/memory.h>
 
 using namespace duckdb_yyjson; // NOLINT
 
@@ -62,6 +67,10 @@ namespace std
 
 namespace duckdb
 {
+
+  AirportTableFunctionSet::AirportTableFunctionSet(AirportCurlPool &connection_pool, AirportSchemaEntry &schema, const string &cache_directory_) : AirportInSchemaSet(schema), connection_pool(connection_pool), cache_directory(cache_directory_)
+  {
+  }
 
   AirportScalarFunctionSet::AirportScalarFunctionSet(AirportCurlPool &connection_pool, AirportSchemaEntry &schema, const string &cache_directory_) : AirportInSchemaSet(schema), connection_pool(connection_pool), cache_directory(cache_directory_)
   {
@@ -451,6 +460,23 @@ namespace duckdb
         auto dictionary_type = ArrowType::GetArrowLogicalType(DBConfig::GetConfig(context), *schema.dictionary);
         arrow_type->SetDictionary(std::move(dictionary_type));
       }
+
+      // Indicate that the field should select any type.
+      bool is_any_type = false;
+      if (schema.metadata != nullptr)
+      {
+        auto column_metadata = ArrowSchemaMetadata(schema.metadata);
+        if (!column_metadata.GetOption("is_any_type").empty())
+        {
+          is_any_type = true;
+        }
+      }
+
+      if (is_any_type)
+      {
+        // This will be sorted out in the bind of the function.
+        return_types.push_back(LogicalType::ANY);
+      }
       else
       {
         return_types.emplace_back(arrow_type->GetDuckType());
@@ -483,15 +509,15 @@ namespace duckdb
     //    printf("Total functions: %lu\n", tables_and_functions.second.size());
 
     // There can be functions with the same name.
-    std::unordered_map<FunctionCatalogSchemaName, std::vector<AirportAPIScalarFunction>> scalar_functions_by_name;
+    std::unordered_map<FunctionCatalogSchemaName, std::vector<AirportAPIScalarFunction>> functions_by_name;
 
     for (auto &function : contents->scalar_functions)
     {
       FunctionCatalogSchemaName function_key{function.catalog_name, function.schema_name, function.name};
-      scalar_functions_by_name[function_key].emplace_back(function);
+      functions_by_name[function_key].emplace_back(function);
     }
 
-    for (const auto &pair : scalar_functions_by_name)
+    for (const auto &pair : functions_by_name)
     {
       ScalarFunctionSet flight_func_set(pair.first.name);
 
@@ -512,10 +538,9 @@ namespace duckdb
         auto output_types = AirportSchemaToLogicalTypes(context, output_schema, function.location, function.flight_info->descriptor());
         D_ASSERT(output_types.size() == 1);
 
-        // FIXME: deal with encoding the input and output types of the function.
         auto scalar_func = ScalarFunction(input_types, output_types[0],
                                           AirportScalarFun,
-                                          nullptr,
+                                          AirportScalarFunBind,
                                           nullptr,
                                           nullptr,
                                           AirportScalarFunInitLocalState,
@@ -535,6 +560,291 @@ namespace duckdb
 
       auto function_entry = make_uniq_base<StandardEntry, ScalarFunctionCatalogEntry>(catalog, schema,
                                                                                       info.Cast<CreateScalarFunctionInfo>());
+      CreateEntry(std::move(function_entry));
+    }
+  }
+
+  class AirportDynamicTableFunctionInfo : public TableFunctionInfo
+  {
+  public:
+    std::shared_ptr<AirportAPITableFunction> function;
+
+  public:
+    AirportDynamicTableFunctionInfo(const std::shared_ptr<AirportAPITableFunction> function_p)
+        : TableFunctionInfo(), function(function_p)
+    {
+    }
+
+    ~AirportDynamicTableFunctionInfo() override
+    {
+    }
+  };
+
+  static unique_ptr<FunctionData> AirportDynamicTableBind(
+      ClientContext &context,
+      TableFunctionBindInput &input,
+      vector<LogicalType> &return_types,
+      vector<string> &names)
+  {
+    auto function_info = input.info->Cast<AirportDynamicTableFunctionInfo>();
+
+    auto server_location = input.inputs[0].ToString();
+    auto params = AirportParseTakeFlightParameters(function_info.function->location,
+                                                   context, input);
+
+    // We are going to want these as an arrow appender row and record batch.
+
+    // If we're going to deal with nested types, we don't want to use a msgpack
+    // based solution here lets do an Arrow based solution.
+
+    // We need to convert the input schema into a schema that DuckDB can parse into logical types.
+
+    ArrowSchemaWrapper schema_root;
+    auto &input_schema = function_info.function->input_schema;
+
+    AIRPORT_ARROW_ASSERT_OK_LOCATION(
+        ExportSchema(*input_schema, &schema_root.arrow_schema),
+        function_info.function->location,
+        "ExportSchema");
+
+    vector<string> input_schema_names;
+    vector<LogicalType> input_schema_types;
+
+    for (idx_t col_idx = 0;
+         col_idx < (idx_t)schema_root.arrow_schema.n_children; col_idx++)
+    {
+      auto &schema = *schema_root.arrow_schema.children[col_idx];
+      if (!schema.release)
+      {
+        throw InvalidInputException("airport_dynamic_table_bind: released schema passed");
+      }
+      auto name = string(schema.name);
+      if (name.empty())
+      {
+        name = string("v") + to_string(col_idx);
+      }
+
+      input_schema_names.push_back(name);
+
+      auto arrow_type = ArrowType::GetArrowLogicalType(DBConfig::GetConfig(context), schema);
+      input_schema_types.push_back(arrow_type->GetDuckType());
+    }
+
+    auto appender = make_uniq<ArrowAppender>(input_schema_types, input_schema_types.size(), context.GetClientProperties(),
+                                             ArrowTypeExtensionData::GetExtensionTypes(context, input_schema_types));
+
+    // Now we need to make a DataChunk from the input bind data so that we can calle the appender.
+    DataChunk input_chunk;
+    input_chunk.Initialize(Allocator::Get(context),
+                           input_schema_types,
+                           1);
+    input_chunk.SetCardinality(1);
+
+    // Now how do we populate the input_chunk with the input data?
+    int seen_named_parameters = 0;
+    for (idx_t col_idx = 0;
+         col_idx < (idx_t)schema_root.arrow_schema.n_children; col_idx++)
+    {
+      auto &schema = *schema_root.arrow_schema.children[col_idx];
+      if (!schema.release)
+      {
+        throw InvalidInputException("airport_dynamic_table_bind: released schema passed");
+      }
+
+      // So if the parameter is named, we'd get that off of the metadata
+      // otherwise its positional.
+      auto metadata = ArrowSchemaMetadata(schema.metadata);
+      if (!metadata.GetOption("is_named_parameter").empty())
+      {
+        input_chunk.data[col_idx].SetValue(0, input.named_parameters[schema.name]);
+        seen_named_parameters += 1;
+      }
+      else
+      {
+        // Since named parameters aren't passed in inputs, we need to adjust
+        // the offset we're looking at.
+        auto &input_data = input.inputs[col_idx - seen_named_parameters];
+        input_chunk.data[col_idx].SetValue(0, input_data);
+      }
+    }
+
+    // Now that we have the appender append some data.
+    appender->Append(input_chunk, 0, input_chunk.size(), input_chunk.size());
+    ArrowArray arr = appender->Finalize();
+
+    AIRPORT_FLIGHT_ASSIGN_OR_RAISE_LOCATION_DESCRIPTOR(
+        auto record_batch,
+        arrow::ImportRecordBatch(&arr, function_info.function->input_schema),
+        function_info.function->location,
+        function_info.function->flight_info->descriptor(), "");
+
+    // Write the record batch to a sequence of bytes.
+    // Write RecordBatch to a sequence of bytes
+
+    AIRPORT_FLIGHT_ASSIGN_OR_RAISE_LOCATION(auto buffer_output_stream, arrow::io::BufferOutputStream::Create(), function_info.function->location, "create buffer output stream");
+
+    AIRPORT_FLIGHT_ASSIGN_OR_RAISE_LOCATION(auto writer, arrow::ipc::MakeStreamWriter(buffer_output_stream, function_info.function->input_schema), function_info.function->location, "make stream writer");
+
+    // Write the RecordBatch
+    AIRPORT_ARROW_ASSERT_OK_LOCATION(writer->WriteRecordBatch(*record_batch), function_info.function->location, "write record batch");
+
+    AIRPORT_ARROW_ASSERT_OK_LOCATION(writer->Close(), function_info.function->location, "close record batch writer");
+
+    auto buffer = buffer_output_stream->Finish().ValueOrDie();
+
+    // So save the buffer so we can send it to the server to determine
+    // the schema of the flight.
+
+    // Then call the DoAction get_dynamic_flight_info with those arguments.
+    GetFlightInfoTableFunctionParameters tf_params;
+    tf_params.parameters = string((char *)buffer->data(), buffer->size());
+    tf_params.schema_name = function_info.function->schema_name;
+    tf_params.action_name = function_info.function->action_name;
+
+    return AirportTakeFlightBindWithFlightDescriptor(
+        params,
+        function_info.function->flight_info->descriptor(),
+        context,
+        input, return_types, names, nullptr,
+        std::make_shared<GetFlightInfoTableFunctionParameters>(tf_params));
+  }
+
+  struct ArrowSchemaTableFunctionTypes
+  {
+    vector<LogicalType> all;
+    vector<string> all_names;
+    vector<LogicalType> positional;
+    vector<string> positional_names;
+    std::map<std::string, LogicalType> named;
+  };
+
+  static ArrowSchemaTableFunctionTypes
+  AirportSchemaToLogicalTypesWithNaming(
+      ClientContext &context,
+      std::shared_ptr<arrow::Schema> schema,
+      const string &server_location,
+      const flight::FlightDescriptor &flight_descriptor)
+  {
+    ArrowSchemaWrapper schema_root;
+
+    AIRPORT_ARROW_ASSERT_OK_LOCATION_DESCRIPTOR(
+        ExportSchema(*schema, &schema_root.arrow_schema),
+        server_location,
+        flight_descriptor,
+        "ExportSchema");
+
+    ArrowSchemaTableFunctionTypes result;
+
+    for (idx_t col_idx = 0;
+         col_idx < (idx_t)schema_root.arrow_schema.n_children; col_idx++)
+    {
+      auto &schema = *schema_root.arrow_schema.children[col_idx];
+      if (!schema.release)
+      {
+        throw InvalidInputException("AirportSchemaToLogicalTypes: released schema passed");
+      }
+      auto arrow_type = ArrowType::GetArrowLogicalType(DBConfig::GetConfig(context), schema);
+
+      if (schema.dictionary)
+      {
+        auto dictionary_type = ArrowType::GetArrowLogicalType(DBConfig::GetConfig(context), *schema.dictionary);
+        arrow_type->SetDictionary(std::move(dictionary_type));
+      }
+
+      result.all.emplace_back(arrow_type->GetDuckType());
+      result.all_names.emplace_back(string(schema.name));
+
+      auto metadata = ArrowSchemaMetadata(schema.metadata);
+      if (!metadata.GetOption("is_named_parameter").empty())
+      {
+        result.named[schema.name] = arrow_type->GetDuckType();
+      }
+      else
+      {
+        result.positional.emplace_back(arrow_type->GetDuckType());
+        result.positional_names.push_back(string(schema.name));
+      }
+    }
+    return result;
+  }
+
+  void AirportTableFunctionSet::LoadEntries(ClientContext &context)
+  {
+    // auto &transaction = AirportTransaction::Get(context, catalog);
+
+    auto &airport_catalog = catalog.Cast<AirportCatalog>();
+
+    auto curl = connection_pool.acquire();
+    auto contents = AirportAPI::GetSchemaItems(
+        curl,
+        catalog.GetDBPath(),
+        schema.name,
+        schema.schema_data->contents_url,
+        schema.schema_data->contents_sha256,
+        schema.schema_data->contents_serialized,
+        cache_directory,
+        airport_catalog.credentials);
+
+    connection_pool.release(curl);
+
+    // There can be functions with the same name.
+    std::unordered_map<FunctionCatalogSchemaName, std::vector<AirportAPITableFunction>> functions_by_name;
+
+    for (auto &function : contents->table_functions)
+    {
+      FunctionCatalogSchemaName function_key{function.catalog_name, function.schema_name, function.name};
+      functions_by_name[function_key].emplace_back(function);
+    }
+
+    for (const auto &pair : functions_by_name)
+    {
+      TableFunctionSet flight_func_set(pair.first.name);
+      vector<FunctionDescription> function_descriptions;
+
+      for (const auto &function : pair.second)
+      {
+        // These input types are available since they are specified in the metadata, but the
+        // schema that is returned likely should be requested dynamically from the dynamic
+        // flight function.
+        auto input_types = AirportSchemaToLogicalTypesWithNaming(context, function.input_schema, function.location, function.flight_info->descriptor());
+
+        FunctionDescription description;
+        description.parameter_types = input_types.positional;
+        description.parameter_names = input_types.positional_names;
+        description.description = function.description;
+        function_descriptions.push_back(std::move(description));
+
+        auto table_func = TableFunction(
+            input_types.positional,
+            AirportTakeFlight,
+            AirportDynamicTableBind,
+            AirportArrowScanInitGlobal,
+            ArrowTableFunction::ArrowScanInitLocal);
+
+        // Add all of t
+        for (auto &named_pair : input_types.named)
+        {
+          table_func.named_parameters.emplace(named_pair.first, named_pair.second);
+        }
+
+        // Need to store some function information along with the function so that when its called
+        // we know what to pass to it.
+        table_func.function_info = make_uniq<AirportDynamicTableFunctionInfo>(std::make_shared<AirportAPITableFunction>(function));
+
+        flight_func_set.AddFunction(table_func);
+      }
+
+      CreateTableFunctionInfo info = CreateTableFunctionInfo(flight_func_set);
+      info.catalog = pair.first.catalog_name;
+      info.schema = pair.first.schema_name;
+
+      for (auto &desc : function_descriptions)
+      {
+        info.descriptions.push_back(std::move(desc));
+      }
+
+      auto function_entry = make_uniq_base<StandardEntry, TableFunctionCatalogEntry>(catalog, schema,
+                                                                                     info.Cast<CreateTableFunctionInfo>());
       CreateEntry(std::move(function_entry));
     }
   }

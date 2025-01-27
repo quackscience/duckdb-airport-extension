@@ -251,18 +251,12 @@ namespace duckdb
         if (schema.dictionary)
         {
           auto dictionary_type = ArrowType::GetArrowLogicalType(DBConfig::GetConfig(context), *schema.dictionary);
-          if (!is_row_id_column)
-          {
-            scan_bind_data->return_types.emplace_back(dictionary_type->GetDuckType());
-          }
           arrow_type->SetDictionary(std::move(dictionary_type));
         }
-        else
+
+        if (!is_row_id_column)
         {
-          if (!is_row_id_column)
-          {
-            scan_bind_data->return_types.emplace_back(arrow_type->GetDuckType());
-          }
+          scan_bind_data->return_types.emplace_back(arrow_type->GetDuckType());
         }
 
         auto name = string(schema.name);

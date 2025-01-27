@@ -430,8 +430,12 @@ namespace duckdb
     // This is the Arrow serialized schema for the input to the function, its not set
     // on tables.
     std::optional<string> input_schema;
+    std::optional<string> action_name;
 
-    MSGPACK_DEFINE_MAP(type, schema, catalog, name, comment, input_schema);
+    // This is the function description for table or scalar functions.
+    std::optional<string> description;
+
+    MSGPACK_DEFINE_MAP(type, schema, catalog, name, comment, input_schema, action_name, description);
   };
 
   static std::unique_ptr<SerializedFlightAppMetadata> ParseFlightAppMetadata(const string &app_metadata)
@@ -474,6 +478,40 @@ namespace duckdb
           parsed_app_metadata->comment);
       contents->tables.emplace_back(table);
     }
+    else if (parsed_app_metadata->type == "table_function")
+    {
+      AirportAPITableFunction function{
+          .location = location,
+          .flight_info = flight_info,
+          .catalog_name = parsed_app_metadata->catalog,
+          .schema_name = parsed_app_metadata->schema,
+          .name = parsed_app_metadata->name,
+          .comment = parsed_app_metadata->comment,
+          .action_name = parsed_app_metadata->action_name.value_or(""),
+          .description = parsed_app_metadata->description.value_or("")};
+
+      if (!parsed_app_metadata->input_schema.has_value())
+      {
+        throw IOException("Table Function metadata does not have an input_schema defined for function " + function.schema_name + "." + function.name);
+      }
+
+      auto serialized_schema = parsed_app_metadata->input_schema.value();
+
+      arrow::io::BufferReader parameter_schema_reader(
+          std::make_shared<arrow::Buffer>(serialized_schema));
+
+      arrow::ipc::DictionaryMemo in_memo;
+      AIRPORT_FLIGHT_ASSIGN_OR_RAISE_LOCATION_DESCRIPTOR(
+          auto parameter_schema,
+          arrow::ipc::ReadSchema(&parameter_schema_reader, &in_memo),
+          location,
+          function.flight_info->descriptor(),
+          "Read serialized input schema");
+
+      function.input_schema = parameter_schema;
+
+      contents->table_functions.emplace_back(function);
+    }
     else if (parsed_app_metadata->type == "scalar_function")
     {
       AirportAPIScalarFunction function{
@@ -484,29 +522,27 @@ namespace duckdb
       function.schema_name = parsed_app_metadata->schema;
       function.name = parsed_app_metadata->name;
       function.comment = parsed_app_metadata->comment;
+      function.description = parsed_app_metadata->description.value_or("");
 
       if (!parsed_app_metadata->input_schema.has_value())
       {
         throw IOException("Function metadata does not have an input_schema defined for function " + function.schema_name + "." + function.name);
       }
 
-      else
-      {
-        auto serialized_schema = parsed_app_metadata->input_schema.value();
+      auto serialized_schema = parsed_app_metadata->input_schema.value();
 
-        arrow::io::BufferReader parameter_schema_reader(
-            std::make_shared<arrow::Buffer>(serialized_schema));
+      arrow::io::BufferReader parameter_schema_reader(
+          std::make_shared<arrow::Buffer>(serialized_schema));
 
-        arrow::ipc::DictionaryMemo in_memo;
-        AIRPORT_FLIGHT_ASSIGN_OR_RAISE_LOCATION_DESCRIPTOR(
-            auto parameter_schema,
-            arrow::ipc::ReadSchema(&parameter_schema_reader, &in_memo),
-            location,
-            function.flight_info->descriptor(),
-            "Read serialized input schema");
+      arrow::ipc::DictionaryMemo in_memo;
+      AIRPORT_FLIGHT_ASSIGN_OR_RAISE_LOCATION_DESCRIPTOR(
+          auto parameter_schema,
+          arrow::ipc::ReadSchema(&parameter_schema_reader, &in_memo),
+          location,
+          function.flight_info->descriptor(),
+          "Read serialized input schema");
 
-        function.input_schema = parameter_schema;
-      }
+      function.input_schema = parameter_schema;
 
       contents->scalar_functions.emplace_back(function);
     }

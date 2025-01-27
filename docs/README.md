@@ -10,8 +10,6 @@ This extension "`airport`" enables the use of [Arrow Flight](https://arrow.apach
 
 Arrow Flight is an RPC framework for high-performance data services based on [Apache Arrow](https://arrow.apache.org/docs/index.html) and is built on top of [gRPC](https://grpc.io) and the [Arrow IPC format](https://arrow.apache.org/docs/format/IPC.html).
 
-
-
 ## API
 
 ### Listing Flights
@@ -119,7 +117,7 @@ __Description:__ This function is a table returning function, it returns the con
 |--------|---|-------------------------------|
 | `auth_token` | `VARCHAR` | A bearer value token to present to the server, the header is formatted like `Authorization: Bearer <auth_token>` |
 | `secret` | `VARCHAR` | This is the name of the [DuckDB secret](https://duckdb.org/docs/configuration/secrets_manager.html) to use to supply the value for the `auth_token` |
-
+| `ticket` | `BLOB` | This is the ticket (an opaque binary token) supplied to the Flight server it overrides any ticket supplied from GetFlightInfo. |
 
 
 ```sql
@@ -155,16 +153,9 @@ The Airport extension respects the scope(s) specified in the secret.  If a value
 
 ### TODO
 
-1. Integration with the DuckDB catalog.
-2. Investigate the multithreaded endpoint support.
-3. Write support?  How to do updates of rows against tables?
-
+1. Investigate the multithreaded endpoint support.
 
 ## Implementation Notes
-
-### Compression of FlightDescriptors
-
-In the Arrow Flight protocol specification, the schema of Flight is sent uncompressed when flights are listed.  When a server has many flights, this can cause the response size of listing flights to be quite large.  A change was made to the Arrow Flight protocol to compress these schemas with ZStandard to reduce the amount of bytes transmitted.
 
 ### Memory Alignment of Apache Arrow Buffers
 
@@ -177,7 +168,7 @@ If other extensions use Apache Arrow please ensure that the patch `align-record-
 ```sh
 # Clone this repo with submodules.
 # duckdb and extension-ci-tools are submodules.
-git clone --recursive git@github.com:rustyconover/duckdb-airport-extension.git
+git clone --recursive git@github.com:Query-farm/duckdb-airport-extension
 
 # Clone the vcpkg repo
 git clone https://github.com/Microsoft/vcpkg.git

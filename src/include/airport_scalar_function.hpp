@@ -9,6 +9,7 @@
 #include "airport_headers.hpp"
 #include "airport_macros.hpp"
 #include "airport_secrets.hpp"
+#include "arrow/util/key_value_metadata.h"
 
 namespace duckdb
 {
@@ -44,6 +45,21 @@ namespace duckdb
       return name_;
     }
 
+    const bool input_schema_includes_any_types()
+    {
+      for (int i = 0; i < input_schema_->num_fields(); ++i)
+      {
+        const auto &field = input_schema_->field(i);
+        auto field_metadata = field->metadata();
+
+        if (field_metadata != nullptr && field_metadata->Contains("is_any_type"))
+        {
+          return true;
+        }
+      }
+      return false;
+    }
+
     std::shared_ptr<flight::FlightInfo> flight_info()
     {
       return flight_info_;
@@ -58,4 +74,6 @@ namespace duckdb
   void AirportScalarFun(DataChunk &args, ExpressionState &state, Vector &result);
   unique_ptr<FunctionLocalState> AirportScalarFunInitLocalState(ExpressionState &state, const BoundFunctionExpression &expr, FunctionData *bind_data);
 
+  unique_ptr<FunctionData> AirportScalarFunBind(ClientContext &context, ScalarFunction &bound_function,
+                                                vector<unique_ptr<Expression>> &arguments);
 }

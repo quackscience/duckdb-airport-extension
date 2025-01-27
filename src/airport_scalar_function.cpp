@@ -189,10 +189,7 @@ namespace duckdb
           auto dictionary_type = ArrowType::GetArrowLogicalType(DBConfig::GetConfig(context), *schema.dictionary);
           arrow_type->SetDictionary(std::move(dictionary_type));
         }
-        else
-        {
-          scan_bind_data->return_types.emplace_back(arrow_type->GetDuckType());
-        }
+        scan_bind_data->return_types.emplace_back(arrow_type->GetDuckType());
 
         scan_bind_data->arrow_table.AddColumn(col_idx, std::move(arrow_type));
 
@@ -226,6 +223,7 @@ namespace duckdb
 
   public:
     std::shared_ptr<arrow::Schema> send_schema;
+    bool input_schema_includes_any_types_;
     string server_location_;
     flight::FlightDescriptor descriptor_;
     std::unique_ptr<AirportExchangeTakeFlightBindData> scan_bind_data;
@@ -238,10 +236,119 @@ namespace duckdb
     unique_ptr<arrow::flight::FlightClient> flight_client;
   };
 
+  struct AirportScalarFunBindData : public FunctionData
+  {
+  public:
+    explicit AirportScalarFunBindData(std::shared_ptr<arrow::Schema> input_schema_p)
+    {
+      input_schema = input_schema_p;
+    }
+
+    unique_ptr<FunctionData> Copy() const override
+    {
+      return make_uniq<AirportScalarFunBindData>(input_schema);
+    };
+
+    bool Equals(const FunctionData &other_p) const override
+    {
+      auto &other = other_p.Cast<AirportScalarFunBindData>();
+      return input_schema == other.input_schema;
+    }
+
+    std::shared_ptr<arrow::Schema> input_schema;
+  };
+
+  unique_ptr<FunctionData> AirportScalarFunBind(ClientContext &context, ScalarFunction &bound_function,
+                                                vector<unique_ptr<Expression>> &arguments)
+  {
+    // FIXME check for the number of arguments.
+    auto &info = bound_function.function_info->Cast<AirportScalarFunctionInfo>();
+
+    if (!info.input_schema_includes_any_types())
+    {
+      return make_uniq<AirportScalarFunBindData>(info.input_schema());
+    }
+
+    // So we need to create the schema dynamically based on the types passed.
+    vector<string> send_names;
+    vector<LogicalType> return_types;
+
+    auto input_schema = info.input_schema();
+
+    ArrowSchemaWrapper schema_root;
+
+    AIRPORT_ARROW_ASSERT_OK_LOCATION_DESCRIPTOR(
+        ExportSchema(*info.input_schema(), &schema_root.arrow_schema),
+        info.location(),
+        info.flight_info()->descriptor(),
+        "ExportSchema");
+
+    for (idx_t col_idx = 0;
+         col_idx < (idx_t)schema_root.arrow_schema.n_children; col_idx++)
+    {
+      auto &schema = *schema_root.arrow_schema.children[col_idx];
+      if (!schema.release)
+      {
+        throw InvalidInputException("AirportSchemaToLogicalTypes: released schema passed");
+      }
+      send_names.push_back(string(schema.name));
+
+      auto arrow_type = ArrowType::GetArrowLogicalType(DBConfig::GetConfig(context), schema);
+
+      if (schema.dictionary)
+      {
+        auto dictionary_type = ArrowType::GetArrowLogicalType(DBConfig::GetConfig(context), *schema.dictionary);
+        arrow_type->SetDictionary(std::move(dictionary_type));
+      }
+
+      // Indicate that the field should select any type.
+      bool is_any_type = false;
+      if (schema.metadata != nullptr)
+      {
+        auto column_metadata = ArrowSchemaMetadata(schema.metadata);
+        if (!column_metadata.GetOption("is_any_type").empty())
+        {
+          is_any_type = true;
+        }
+      }
+
+      if (is_any_type)
+      {
+        return_types.push_back(arguments[col_idx]->return_type);
+      }
+      else
+      {
+        return_types.emplace_back(arrow_type->GetDuckType());
+      }
+    }
+
+    // Now convert the list of names and LogicalTypes to an ArrowSchema
+    ArrowSchema send_schema;
+    auto client_properties = context.GetClientProperties();
+    ArrowConverter::ToArrowSchema(&send_schema, return_types, send_names, client_properties);
+
+    std::shared_ptr<arrow::Schema> cpp_schema;
+
+    // Export the C based schema to the C++ one.
+    AIRPORT_FLIGHT_ASSIGN_OR_RAISE_LOCATION_DESCRIPTOR(
+        cpp_schema,
+        arrow::ImportSchema(&send_schema),
+        info.location(),
+        info.flight_info()->descriptor(),
+        "ExportSchema");
+
+    return make_uniq<AirportScalarFunBindData>(cpp_schema);
+  }
+
   void AirportScalarFun(DataChunk &args, ExpressionState &state, Vector &result)
   {
     auto &lstate = ExecuteFunctionState::GetFunctionState(state)->Cast<AirportScalarFunctionLocalState>();
     auto &context = state.GetContext();
+
+    D_ASSERT(lstate.send_schema);
+
+    // So the send schema can contain ANY fields, if it does, we want to dynamically create the schema from
+    // what was supplied.
 
     auto appender = make_uniq<ArrowAppender>(args.GetTypes(), args.size(), context.GetClientProperties(),
                                              ArrowTypeExtensionData::GetExtensionTypes(context, args.GetTypes()));
@@ -249,8 +356,6 @@ namespace duckdb
     // Now that we have the appender append some data.
     appender->Append(args, 0, args.size(), args.size());
     ArrowArray arr = appender->Finalize();
-
-    D_ASSERT(lstate.send_schema);
 
     AIRPORT_FLIGHT_ASSIGN_OR_RAISE_LOCATION_DESCRIPTOR(
         auto record_batch,
@@ -264,17 +369,6 @@ namespace duckdb
         lstate.server_location_,
         lstate.descriptor_, "");
 
-    // Now read the data back from the server.
-    // So that it fills the entire vector.
-
-    // This is going the tricky part, because do we want the reader established before in the local state
-    // I think we do.
-
-    // {
-    //   auto &data = gstate.scan_table_function_input->bind_data->CastNoConst<ArrowScanFunctionData>(); // FIXME
-    //   auto &state = gstate.scan_table_function_input->local_state->Cast<ArrowScanLocalState>();
-    //   auto &global_state = gstate.scan_table_function_input->global_state->Cast<ArrowScanGlobalState>();
-
     lstate.scan_local_state->Reset();
 
     auto current_chunk = lstate.scan_global_state->stream->GetNextChunk();
@@ -282,9 +376,6 @@ namespace duckdb
 
     auto output_size =
         MinValue<idx_t>(STANDARD_VECTOR_SIZE, NumericCast<idx_t>(lstate.scan_local_state->chunk->arrow_array.length) - lstate.scan_local_state->chunk_offset);
-    //   data.lines_read += output_size;
-
-    // The trick here is that we don't have a data chunk to read into
 
     DataChunk returning_data_chunk;
     returning_data_chunk.Initialize(Allocator::Get(context),
@@ -308,12 +399,13 @@ namespace duckdb
   unique_ptr<FunctionLocalState> AirportScalarFunInitLocalState(ExpressionState &state, const BoundFunctionExpression &expr, FunctionData *bind_data)
   {
     auto &info = expr.function.function_info->Cast<AirportScalarFunctionInfo>();
+    auto &data = bind_data->Cast<AirportScalarFunBindData>();
 
     return make_uniq<AirportScalarFunctionLocalState>(
         state.GetContext(),
         info.location(),
         info.flight_info(),
-        info.input_schema());
+        // Use this schema that should have the proper types for the any columns.
+        data.input_schema);
   }
-
 }

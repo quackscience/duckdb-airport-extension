@@ -41,9 +41,35 @@ namespace duckdb
     string name;
 
     string comment;
+    string description;
 
     string location;
     std::shared_ptr<arrow::flight::FlightInfo> flight_info;
+    std::shared_ptr<arrow::Schema> input_schema;
+  };
+
+  struct AirportAPITableFunction
+  {
+    string catalog_name;
+    string schema_name;
+
+    // The name of the table function.
+    string name;
+    string description;
+    string comment;
+
+    // The name of the action passed, if there is a single
+    // flight that exists it can respond with different outputs
+    // based on this name.
+    string action_name;
+
+    // The location of the flight server that will prduce the data.
+    string location;
+
+    // This is the flight that will be called to satisfy the function.
+    std::shared_ptr<arrow::flight::FlightInfo> flight_info;
+
+    // The schema of the input to the function.
     std::shared_ptr<arrow::Schema> input_schema;
   };
 
@@ -80,6 +106,7 @@ namespace duckdb
   public:
     vector<AirportAPITable> tables;
     vector<AirportAPIScalarFunction> scalar_functions;
+    vector<AirportAPITableFunction> table_functions;
   };
 
   class AirportAPI

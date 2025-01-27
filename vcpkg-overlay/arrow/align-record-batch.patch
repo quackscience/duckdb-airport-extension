@@ -1,16 +1,16 @@
 diff --git a/cpp/src/arrow/c/bridge.cc b/cpp/src/arrow/c/bridge.cc
-index eba575f4c..339210a87 100644
+index 6b30802c7..7c5dca04a 100644
 --- a/cpp/src/arrow/c/bridge.cc
 +++ b/cpp/src/arrow/c/bridge.cc
-@@ -37,6 +37,7 @@
+@@ -40,6 +40,7 @@
  #include "arrow/result.h"
  #include "arrow/stl_allocator.h"
  #include "arrow/type_traits.h"
 +#include "arrow/util/align_util.h"
+ #include "arrow/util/async_generator.h"
  #include "arrow/util/bit_util.h"
  #include "arrow/util/checked_cast.h"
- #include "arrow/util/key_value_metadata.h"
-@@ -2039,6 +2040,7 @@ Status ExportStreamNext(const std::shared_ptr<RecordBatchReader>& src, int64_t i
+@@ -2051,6 +2052,7 @@ Status ExportStreamNext(const std::shared_ptr<RecordBatchReader>& src, int64_t i
      ArrowArrayMarkReleased(out_array);
      return Status::OK();
    } else {

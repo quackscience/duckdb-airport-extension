@@ -55,4 +55,19 @@ namespace duckdb
     ~AirportScalarFunctionSet() {}
   };
 
+  class AirportTableFunctionSet : public AirportInSchemaSet
+  {
+
+  protected:
+    void LoadEntries(ClientContext &context) override;
+
+  private:
+    AirportCurlPool &connection_pool;
+    string cache_directory;
+
+  public:
+    explicit AirportTableFunctionSet(AirportCurlPool &connection_pool, AirportSchemaEntry &schema, const string &cache_directory);
+    ~AirportTableFunctionSet() {}
+  };
+
 } // namespace duckdb

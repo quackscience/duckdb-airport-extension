@@ -61,7 +61,16 @@ namespace duckdb
     std::unique_ptr<AirportTakeFlightScanData> scan_data = nullptr;
     std::unique_ptr<arrow::flight::FlightClient> flight_client = nullptr;
 
+    // This is the location of the flight server.
     string server_location;
+
+    // This is the auth token.
+    string auth_token;
+
+    // This is the token to use for the flight as supplied by the user.
+    // if its empty use the token from the server.
+    string ticket;
+
     string json_filters;
 
     // This is the trace id so that calls to GetFlightInfo and DoGet can be traced.
@@ -71,8 +80,6 @@ namespace duckdb
 
     idx_t row_id_column_index = COLUMN_IDENTIFIER_ROW_ID;
 
-    // This is the auth token.
-    string auth_token;
     mutable mutex lock;
 
     // Force no-result
