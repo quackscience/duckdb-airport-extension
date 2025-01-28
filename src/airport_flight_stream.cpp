@@ -197,8 +197,11 @@ namespace duckdb
       return nullptr;
     }
 
-    // Release the stream
-    return stream_wrapper;
+    // Explicitly move and cast to base class
+    unique_ptr<duckdb::ArrowArrayStreamWrapper> base_stream_wrapper =
+        std::move(stream_wrapper);
+
+    return base_stream_wrapper;
   }
 
   void AirportFlightStreamReader::GetSchema(uintptr_t buffer_ptr,

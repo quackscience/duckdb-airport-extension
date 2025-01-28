@@ -118,6 +118,7 @@ __Description:__ This function is a table returning function, it returns the con
 | `auth_token` | `VARCHAR` | A bearer value token to present to the server, the header is formatted like `Authorization: Bearer <auth_token>` |
 | `secret` | `VARCHAR` | This is the name of the [DuckDB secret](https://duckdb.org/docs/configuration/secrets_manager.html) to use to supply the value for the `auth_token` |
 | `ticket` | `BLOB` | This is the ticket (an opaque binary token) supplied to the Flight server it overrides any ticket supplied from GetFlightInfo. |
+| `headers` | `MAP(VARCHAR, VARCHAR)` | A map of extra GRPC headers to send with requests to the Flight server. |
 
 
 ```sql

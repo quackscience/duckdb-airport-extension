@@ -1,7 +1,7 @@
 [submodule "duckdb"]
 	path = duckdb
-	url = https://github.com/duckdb/duckdb
-	branch = main
+	url = https://github.com/rustyconover/duckdb
+	branch = rusty_features
 [submodule "extension-ci-tools"]
 	path = extension-ci-tools
 	url = https://github.com/rustyconover/extension-ci-tools

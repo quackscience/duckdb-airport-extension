@@ -387,7 +387,7 @@ namespace duckdb
     // The result is a catalog entry, so we're going to need to create that if the
     // action succeeded.
 
-    auto table_entry = make_uniq<AirportTableEntry>(catalog, this->schema, base, LogicalType::BIGINT);
+    auto table_entry = make_uniq<AirportTableEntry>(catalog, this->schema, base, LogicalType(LogicalTypeId::BIGINT));
     AirportAPITable new_table(
         airport_catalog.credentials.location,
         flight_info,

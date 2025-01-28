@@ -116,6 +116,20 @@ namespace duckdb
       {
         params.ticket = StringValue::Get(kv.second);
       }
+      else if (loption == "headers")
+      {
+        // Now we need to parse out the map contents.
+        auto &children = duckdb::MapValue::GetChildren(kv.second);
+
+        for (auto &value_pair : children)
+        {
+          auto &child_struct = duckdb::StructValue::GetChildren(value_pair);
+          auto key = StringValue::Get(child_struct[0]);
+          auto value = StringValue::Get(child_struct[1]);
+
+          params.user_supplied_headers[key].push_back(value);
+        }
+      }
     }
 
     params.auth_token = AirportAuthTokenForLocation(context, params.server_location, params.secret_name, params.auth_token);
@@ -166,6 +180,14 @@ namespace duckdb
       auto path_parts = descriptor.path;
       std::string joined_path_parts = join_vector_of_strings(path_parts, '/');
       call_options.headers.emplace_back("airport-flight-path", joined_path_parts);
+    }
+
+    for (const auto &header_pair : take_flight_params.user_supplied_headers)
+    {
+      for (const auto &header_value : header_pair.second)
+      {
+        call_options.headers.emplace_back(header_pair.first, header_value);
+      }
     }
 
     // Get the information about the flight, this will allow the
@@ -244,6 +266,7 @@ namespace duckdb
     ret->scan_data = std::move(scan_data);
     ret->flight_client = std::move(flight_client);
     ret->ticket = take_flight_params.ticket;
+    ret->user_supplied_headers = take_flight_params.user_supplied_headers;
     ret->auth_token = take_flight_params.auth_token;
     ret->server_location = take_flight_params.server_location;
     ret->trace_id = trace_uuid;
@@ -587,6 +610,14 @@ namespace duckdb
       call_options.headers.emplace_back("airport-skip-producing-results", "1");
     }
 
+    for (const auto &header_pair : bind_data.user_supplied_headers)
+    {
+      for (const auto &header_value : header_pair.second)
+      {
+        call_options.headers.emplace_back(header_pair.first, header_value);
+      }
+    }
+
     // Rather than using the headers, check to see if the ticket starts with <TICKET_ALLOWS_METADATA>
 
     auto server_ticket = bind_data.scan_data->flight_info_->endpoints()[0].ticket;
@@ -680,6 +711,7 @@ namespace duckdb
     take_flight_function_with_descriptor.named_parameters["auth_token"] = LogicalType::VARCHAR;
     take_flight_function_with_descriptor.named_parameters["secret"] = LogicalType::VARCHAR;
     take_flight_function_with_descriptor.named_parameters["ticket"] = LogicalType::BLOB;
+    take_flight_function_with_descriptor.named_parameters["headers"] = LogicalType::MAP(LogicalType::VARCHAR, LogicalType::VARCHAR);
     take_flight_function_with_descriptor.pushdown_complex_filter = take_flight_complex_filter_pushdown;
 
     // Add support for optional named paraemters that would be appended to the descriptor

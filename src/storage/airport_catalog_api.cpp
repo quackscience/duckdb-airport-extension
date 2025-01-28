@@ -435,7 +435,7 @@ namespace duckdb
     // This is the function description for table or scalar functions.
     std::optional<string> description;
 
-    MSGPACK_DEFINE_MAP(type, schema, catalog, name, comment, input_schema, action_name, description);
+    MSGPACK_DEFINE_MAP(type, schema, catalog, name, comment, input_schema, action_name, description)
   };
 
   static std::unique_ptr<SerializedFlightAppMetadata> ParseFlightAppMetadata(const string &app_metadata)
@@ -480,15 +480,16 @@ namespace duckdb
     }
     else if (parsed_app_metadata->type == "table_function")
     {
-      AirportAPITableFunction function{
-          .location = location,
-          .flight_info = flight_info,
-          .catalog_name = parsed_app_metadata->catalog,
-          .schema_name = parsed_app_metadata->schema,
-          .name = parsed_app_metadata->name,
-          .comment = parsed_app_metadata->comment,
-          .action_name = parsed_app_metadata->action_name.value_or(""),
-          .description = parsed_app_metadata->description.value_or("")};
+      AirportAPITableFunction function;
+
+      function.location = location;
+      function.flight_info = std::move(flight_info);
+      function.catalog_name = parsed_app_metadata->catalog;
+      function.schema_name = parsed_app_metadata->schema;
+      function.name = parsed_app_metadata->name;
+      function.comment = parsed_app_metadata->comment;
+      function.action_name = parsed_app_metadata->action_name.value_or("");
+      function.description = parsed_app_metadata->description.value_or("");
 
       if (!parsed_app_metadata->input_schema.has_value())
       {
@@ -514,9 +515,9 @@ namespace duckdb
     }
     else if (parsed_app_metadata->type == "scalar_function")
     {
-      AirportAPIScalarFunction function{
-          .location = location,
-          .flight_info = std::move(flight_info)};
+      AirportAPIScalarFunction function;
+      function.location = location;
+      function.flight_info = std::move(flight_info);
 
       function.catalog_name = parsed_app_metadata->catalog;
       function.schema_name = parsed_app_metadata->schema;
@@ -680,7 +681,7 @@ namespace duckdb
     std::optional<std::string> url;
     std::optional<std::string> sha256;
     std::optional<std::string> serialized;
-    MSGPACK_DEFINE_MAP(url, sha256, serialized);
+    MSGPACK_DEFINE_MAP(url, sha256, serialized)
   };
 
   struct SerializedSchema
@@ -690,7 +691,7 @@ namespace duckdb
     std::unordered_map<std::string, std::string> tags;
     SerializedContents contents;
 
-    MSGPACK_DEFINE_MAP(schema, description, tags, contents);
+    MSGPACK_DEFINE_MAP(schema, description, tags, contents)
   };
 
   struct SerializedCatalogRoot
@@ -698,7 +699,7 @@ namespace duckdb
     SerializedContents contents;
     std::vector<SerializedSchema> schemas;
 
-    MSGPACK_DEFINE_MAP(contents, schemas); // MessagePack mapping
+    MSGPACK_DEFINE_MAP(contents, schemas)
   };
 
   // This is not the schemas of the tables.

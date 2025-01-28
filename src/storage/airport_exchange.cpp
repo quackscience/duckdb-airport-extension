@@ -203,7 +203,7 @@ namespace duckdb
         arrow_types.push_back(arrow_type->GetDuckType().ToString());
       }
 
-      for (auto output_index = 0; output_index < destination_chunk_column_names.size(); output_index++)
+      for (size_t output_index = 0; output_index < destination_chunk_column_names.size(); output_index++)
       {
         auto found_index = findIndex(reading_arrow_column_names, destination_chunk_column_names[output_index]);
         if (exchange_operation != "update")

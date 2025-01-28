@@ -37,7 +37,7 @@ namespace duckdb
     std::string table_name;
 
     // Define how to serialize/deserialize the structure using MessagePack
-    MSGPACK_DEFINE(schema_name, table_name);
+    MSGPACK_DEFINE(schema_name, table_name)
   };
 
   void AirportCatalogSet::DropEntry(ClientContext &context, DropInfo &info)
